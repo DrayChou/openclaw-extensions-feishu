@@ -1,6 +1,8 @@
 import fs from "fs";
 import path from "path";
 import { Readable } from "stream";
+import { spawn } from "child_process";
+import { tmpdir } from "os";
 import { withTempDownloadPath, type ClawdbotConfig } from "openclaw/plugin-sdk/feishu";
 import { resolveFeishuAccount } from "./accounts.js";
 import { createFeishuClient } from "./client.js";
@@ -414,9 +416,83 @@ export function detectFileType(
 }
 
 /**
+ * Check if a file is an audio file based on extension
+ * Supports: mp3, wav, m4a, aac, flac, wma, opus, ogg
+ */
+export function isAudioFile(fileName: string): boolean {
+  const ext = path.extname(fileName).toLowerCase();
+  const audioExts = [".mp3", ".wav", ".m4a", ".aac", ".flac", ".wma", ".opus", ".ogg"];
+  return audioExts.includes(ext);
+}
+
+/**
+ * Get audio duration in milliseconds using ffprobe
+ */
+async function getAudioDurationMs(inputPath: string): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const args = [
+      "-v", "error",
+      "-show_entries", "format=duration",
+      "-of", "default=noprint_wrappers=1:nokey=1",
+      inputPath
+    ];
+    const proc = spawn("ffprobe", args);
+    let stdout = "";
+    let stderr = "";
+    proc.stdout.on("data", (data) => { stdout += data; });
+    proc.stderr.on("data", (data) => { stderr += data; });
+    proc.on("close", (code) => {
+      if (code !== 0) {
+        reject(new Error(`ffprobe failed: ${stderr}`));
+        return;
+      }
+      const duration = parseFloat(stdout.trim());
+      if (isNaN(duration)) {
+        reject(new Error(`Failed to parse duration: ${stdout}`));
+        return;
+      }
+      resolve(Math.round(duration * 1000));
+    });
+    proc.on("error", (err) => reject(err));
+  });
+}
+
+/**
+ * Convert audio to Opus format for Feishu voice message
+ * Feishu requires: libopus, 24kHz, mono, 24kbps
+ */
+async function convertAudioToOpus(inputPath: string, outputPath: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const args = [
+      "-i", inputPath,
+      "-c:a", "libopus",
+      "-b:a", "24k",
+      "-ar", "24000",
+      "-ac", "1",
+      "-y",
+      outputPath
+    ];
+    const proc = spawn("ffmpeg", args);
+    let stderr = "";
+    proc.stderr.on("data", (data) => { stderr += data; });
+    proc.on("close", (code) => {
+      if (code !== 0) {
+        reject(new Error(`ffmpeg conversion failed: ${stderr}`));
+        return;
+      }
+      resolve();
+    });
+    proc.on("error", (err) => reject(err));
+  });
+}
+
+/**
  * Upload and send media (image or file) from URL, local path, or buffer.
  * When mediaUrl is a local path, mediaLocalRoots (from core outbound context)
  * must be passed so loadWebMedia allows the path (post CVE-2026-26321).
+ *
+ * For audio files (mp3, wav, m4a, etc.), automatically converts to Opus format
+ * and sends as a voice message to Feishu.
  */
 export async function sendMediaFeishu(params: {
   cfg: ClawdbotConfig;
@@ -472,25 +548,98 @@ export async function sendMediaFeishu(params: {
   if (isImage) {
     const { imageKey } = await uploadImageFeishu({ cfg, image: buffer, accountId });
     return sendImageFeishu({ cfg, to, imageKey, replyToMessageId, replyInThread, accountId });
-  } else {
-    const fileType = detectFileType(name);
-    const { fileKey } = await uploadFileFeishu({
-      cfg,
-      file: buffer,
-      fileName: name,
-      fileType,
-      accountId,
-    });
-    // Feishu API: opus -> "audio", mp4/video -> "media" (playable), others -> "file"
-    const msgType = fileType === "opus" ? "audio" : fileType === "mp4" ? "media" : "file";
-    return sendFileFeishu({
-      cfg,
-      to,
-      fileKey,
-      msgType,
-      replyToMessageId,
-      replyInThread,
-      accountId,
-    });
   }
+
+  // Check if it's an audio file that needs conversion
+  if (isAudioFile(name)) {
+    const isOpus = ext === ".opus" || ext === ".ogg";
+
+    if (isOpus) {
+      // Already Opus format, upload directly
+      const { fileKey } = await uploadFileFeishu({
+        cfg,
+        file: buffer,
+        fileName: name,
+        fileType: "opus",
+        accountId,
+      });
+      return sendFileFeishu({
+        cfg,
+        to,
+        fileKey,
+        msgType: "audio",
+        replyToMessageId,
+        replyInThread,
+        accountId,
+      });
+    }
+
+    // Need to convert to Opus format
+    const tmpInput = path.join(tmpdir(), `feishu-audio-input-${Date.now()}${ext}`);
+    const tmpOutput = path.join(tmpdir(), `feishu-audio-output-${Date.now()}.opus`);
+
+    try {
+      // Write input buffer to temp file
+      await fs.promises.writeFile(tmpInput, buffer);
+
+      // Get audio duration
+      const duration = await getAudioDurationMs(tmpInput);
+
+      // Convert to Opus
+      await convertAudioToOpus(tmpInput, tmpOutput);
+
+      // Read converted file
+      const opusBuffer = await fs.promises.readFile(tmpOutput);
+
+      // Upload as Opus audio
+      const opusFileName = path.basename(name, ext) + ".opus";
+      const { fileKey } = await uploadFileFeishu({
+        cfg,
+        file: opusBuffer,
+        fileName: opusFileName,
+        fileType: "opus",
+        duration,
+        accountId,
+      });
+
+      return sendFileFeishu({
+        cfg,
+        to,
+        fileKey,
+        msgType: "audio",
+        replyToMessageId,
+        replyInThread,
+        accountId,
+      });
+    } finally {
+      // Cleanup temp files
+      try {
+        await fs.promises.unlink(tmpInput);
+      } catch { /* ignore */ }
+      try {
+        await fs.promises.unlink(tmpOutput);
+      } catch { /* ignore */ }
+    }
+  }
+
+  // Non-audio file: use original logic
+  const fileType = detectFileType(name);
+  const { fileKey } = await uploadFileFeishu({
+    cfg,
+    file: buffer,
+    fileName: name,
+    fileType,
+    accountId,
+  });
+  // Feishu API: opus -> "audio", mp4/video -> "media" (playable), others -> "file"
+  const msgType = fileType === "opus" ? "audio" : fileType === "mp4" ? "media" : "file";
+  return sendFileFeishu({
+    cfg,
+    to,
+    fileKey,
+    msgType,
+    replyToMessageId,
+    replyInThread,
+    accountId,
+  });
 }

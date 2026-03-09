@@ -14,8 +14,8 @@
       "./index.ts"
     ],
     "channel": {
-      "id": "feishu",
-      "label": "Feishu",
+      "id": "feishu-custom",
+      "label": "Feishu Custom",
       "selectionLabel": "Feishu/Lark 飞书 (Custom with audio/video conversion)",
       "docsPath": "/channels/feishu",
       "docsLabel": "feishu",

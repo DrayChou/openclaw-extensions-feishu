@@ -426,9 +426,49 @@ export function isAudioFile(fileName: string): boolean {
 }
 
 /**
- * Get audio duration in milliseconds using ffprobe
+ * Check if a file is a video file based on extension
+ * Supports: mp4, mov, avi, mkv, webm, wmv, flv, m4v
  */
-async function getAudioDurationMs(inputPath: string): Promise<number> {
+export function isVideoFile(fileName: string): boolean {
+  const ext = path.extname(fileName).toLowerCase();
+  const videoExts = [".mp4", ".mov", ".avi", ".mkv", ".webm", ".wmv", ".flv", ".m4v"];
+  return videoExts.includes(ext);
+}
+
+/**
+ * Convert audio to Opus format for Feishu voice message
+ * Feishu requires: libopus, 24kHz, mono, 24kbps
+ */
+async function convertAudioToOpus(inputPath: string, outputPath: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const args = [
+      "-i", inputPath,
+      "-c:a", "libopus",
+      "-b:a", "24k",
+      "-ar", "24000",
+      "-ac", "1",
+      "-y",
+      outputPath
+    ];
+    const proc = spawn("ffmpeg", args);
+    let stderr = "";
+    proc.stderr.on("data", (data) => { stderr += data; });
+    proc.on("close", (code) => {
+      if (code !== 0) {
+        reject(new Error(`ffmpeg conversion failed: ${stderr}`));
+        return;
+      }
+      resolve();
+    });
+    proc.on("error", (err) => reject(err));
+  });
+}
+
+/**
+ * Get media duration in milliseconds using ffprobe
+ * Works for both audio and video files
+ */
+async function getMediaDurationMs(inputPath: string): Promise<number> {
   return new Promise((resolve, reject) => {
     const args = [
       "-v", "error",
@@ -458,17 +498,19 @@ async function getAudioDurationMs(inputPath: string): Promise<number> {
 }
 
 /**
- * Convert audio to Opus format for Feishu voice message
- * Feishu requires: libopus, 24kHz, mono, 24kbps
+ * Convert video to MP4 format for Feishu media message
+ * Feishu requires: H.264 video, AAC audio, MP4 container
  */
-async function convertAudioToOpus(inputPath: string, outputPath: string): Promise<void> {
+async function convertVideoToMp4(inputPath: string, outputPath: string): Promise<void> {
   return new Promise((resolve, reject) => {
     const args = [
       "-i", inputPath,
-      "-c:a", "libopus",
-      "-b:a", "24k",
-      "-ar", "24000",
-      "-ac", "1",
+      "-c:v", "libx264",
+      "-preset", "fast",
+      "-crf", "23",
+      "-c:a", "aac",
+      "-b:a", "128k",
+      "-movflags", "+faststart",
       "-y",
       outputPath
     ];
@@ -477,7 +519,7 @@ async function convertAudioToOpus(inputPath: string, outputPath: string): Promis
     proc.stderr.on("data", (data) => { stderr += data; });
     proc.on("close", (code) => {
       if (code !== 0) {
-        reject(new Error(`ffmpeg conversion failed: ${stderr}`));
+        reject(new Error(`ffmpeg video conversion failed: ${stderr}`));
         return;
       }
       resolve();
@@ -583,7 +625,7 @@ export async function sendMediaFeishu(params: {
       await fs.promises.writeFile(tmpInput, buffer);
 
       // Get audio duration
-      const duration = await getAudioDurationMs(tmpInput);
+      const duration = await getMediaDurationMs(tmpInput);
 
       // Convert to Opus
       await convertAudioToOpus(tmpInput, tmpOutput);
@@ -622,7 +664,89 @@ export async function sendMediaFeishu(params: {
     }
   }
 
-  // Non-audio file: use original logic
+  // Check if it's a video file that needs conversion
+  if (isVideoFile(name)) {
+    const isMp4 = ext === ".mp4" || ext === ".m4v";
+
+    if (isMp4) {
+      // Already MP4 format, upload directly as media
+      const tmpInput = path.join(tmpdir(), `feishu-video-input-${Date.now()}${ext}`);
+      try {
+        await fs.promises.writeFile(tmpInput, buffer);
+        const duration = await getMediaDurationMs(tmpInput);
+        const { fileKey } = await uploadFileFeishu({
+          cfg,
+          file: buffer,
+          fileName: name,
+          fileType: "mp4",
+          duration,
+          accountId,
+        });
+        return sendFileFeishu({
+          cfg,
+          to,
+          fileKey,
+          msgType: "media",
+          replyToMessageId,
+          replyInThread,
+          accountId,
+        });
+      } finally {
+        try {
+          await fs.promises.unlink(tmpInput);
+        } catch { /* ignore */ }
+      }
+    }
+
+    // Need to convert to MP4 format
+    const tmpInput = path.join(tmpdir(), `feishu-video-input-${Date.now()}${ext}`);
+    const tmpOutput = path.join(tmpdir(), `feishu-video-output-${Date.now()}.mp4`);
+
+    try {
+      // Write input buffer to temp file
+      await fs.promises.writeFile(tmpInput, buffer);
+
+      // Get video duration
+      const duration = await getMediaDurationMs(tmpInput);
+
+      // Convert to MP4
+      await convertVideoToMp4(tmpInput, tmpOutput);
+
+      // Read converted file
+      const mp4Buffer = await fs.promises.readFile(tmpOutput);
+
+      // Upload as MP4 video
+      const mp4FileName = path.basename(name, ext) + ".mp4";
+      const { fileKey } = await uploadFileFeishu({
+        cfg,
+        file: mp4Buffer,
+        fileName: mp4FileName,
+        fileType: "mp4",
+        duration,
+        accountId,
+      });
+
+      return sendFileFeishu({
+        cfg,
+        to,
+        fileKey,
+        msgType: "media",
+        replyToMessageId,
+        replyInThread,
+        accountId,
+      });
+    } finally {
+      // Cleanup temp files
+      try {
+        await fs.promises.unlink(tmpInput);
+      } catch { /* ignore */ }
+      try {
+        await fs.promises.unlink(tmpOutput);
+      } catch { /* ignore */ }
+    }
+  }
+
+  // Non-media file: use original logic
   const fileType = detectFileType(name);
   const { fileKey } = await uploadFileFeishu({
     cfg,

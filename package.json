@@ -1,7 +1,7 @@
 {
-  "name": "@openclaw/feishu",
-  "version": "2026.3.7",
-  "description": "OpenClaw Feishu/Lark channel plugin (community maintained by @m1heng)",
+  "name": "@draychou/feishu",
+  "version": "2026.3.7-custom.1",
+  "description": "OpenClaw Feishu/Lark channel plugin (custom fork with audio/video conversion support)",
   "type": "module",
   "dependencies": {
     "@larksuiteoapi/node-sdk": "^1.59.0",
@@ -14,22 +14,23 @@
       "./index.ts"
     ],
     "channel": {
-      "id": "feishu",
-      "label": "Feishu",
-      "selectionLabel": "Feishu/Lark (飞书)",
+      "id": "feishu-custom",
+      "label": "Feishu (Custom)",
+      "selectionLabel": "Feishu/Lark 飞书 (Custom with audio/video conversion)",
       "docsPath": "/channels/feishu",
       "docsLabel": "feishu",
-      "blurb": "飞书/Lark enterprise messaging with doc/wiki/drive tools.",
+      "blurb": "飞书/Lark enterprise messaging with audio/video format auto-conversion.",
       "aliases": [
-        "lark"
+        "lark",
+        "feishu"
       ],
       "order": 35,
       "quickstartAllowFrom": true
     },
     "install": {
-      "npmSpec": "@openclaw/feishu",
-      "localPath": "extensions/feishu",
-      "defaultChoice": "npm"
+      "npmSpec": "@draychou/feishu",
+      "localPath": "extensions/feishu-custom",
+      "defaultChoice": "local"
     }
   }
 }

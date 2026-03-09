@@ -14,15 +14,14 @@
       "./index.ts"
     ],
     "channel": {
-      "id": "feishu-custom",
-      "label": "Feishu (Custom)",
+      "id": "feishu",
+      "label": "Feishu",
       "selectionLabel": "Feishu/Lark 飞书 (Custom with audio/video conversion)",
       "docsPath": "/channels/feishu",
       "docsLabel": "feishu",
       "blurb": "飞书/Lark enterprise messaging with audio/video format auto-conversion.",
       "aliases": [
-        "lark",
-        "feishu"
+        "lark"
       ],
       "order": 35,
       "quickstartAllowFrom": true
